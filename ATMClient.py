@@ -49,32 +49,39 @@ from Crypto.Random import get_random_bytes
 KDC_HOST = "localhost"
 KDC_PORT = 1234
 
-# Send and receive utf helpers using encryption and mac keys -------------------
+# performs a hash of the data using the mac_key to ensure data integrity later
 def hmac_sha256(key: bytes, data: bytes) -> bytes:
     return hmac.new(key, data, hashlib.sha256).digest()
 
+# send secure utf performs the encryption using the encryption key, tags the hashed message with the mac key, and sends the utf
 def send_secure_utf(sock: socket.socket, enc_key: bytes, mac_key: bytes, obj: dict) -> None:
+    # converts a python dictionary into a json object, encrypts that using the encryption key.
     plaintext = json.dumps(obj)
-    ciphertext = aes_encrypt(enc_key, plaintext)   # returns bytes
+    ciphertext = aes_encrypt(enc_key, plaintext)  
+    # generates a hash of the encrypted message using the mac key.
     tag = hmac_sha256(mac_key, ciphertext)
 
     packet = {
         "ct": base64.b64encode(ciphertext).decode("utf-8"),
         "tag": base64.b64encode(tag).decode("utf-8")
     }
+    # sends the packet as a json object to the other side of the connection.
     send_utf(sock, json.dumps(packet))
 
+# receive secure utf performs the decryption using the encryption key to get the message, verifies the data integrity using the tag hashed by the mac key.
 def recv_secure_utf(sock: socket.socket, enc_key: bytes, mac_key: bytes) -> dict:
     packet = json.loads(recv_utf(sock))
 
     ciphertext = base64.b64decode(packet["ct"])
     tag = base64.b64decode(packet["tag"])
 
+    # Message Verification by verifying the tag with the message with the hash of the original message received (Data Integrity)
     expected_tag = hmac_sha256(mac_key, ciphertext)
     if not hmac.compare_digest(tag, expected_tag):
         raise ValueError("MAC verification failed")
 
-    plaintext = aes_decrypt(enc_key, ciphertext)   # returns str
+    # Decrypts the message using the encryption key and returns the string.
+    plaintext = aes_decrypt(enc_key, ciphertext)  
     return json.loads(plaintext)
 
 # ── Socket framing ─────────────────────────────────────────────────────────────
@@ -95,6 +102,7 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
         buf += chunk
     return buf
 
+# send and receive utf functions to more accurately transmit messages as bytes and display received messages.
 def send_utf(sock: socket.socket, s: str) -> None:
     send_msg(sock, s.encode("utf-8"))
 
@@ -103,7 +111,6 @@ def recv_utf(sock: socket.socket) -> str:
 
 
 # ── RSA raw (NoPadding) — mirrors Java RSA/ECB/NoPadding ──────────────────────
-
 def rsa_encrypt_raw(pub_key: RSA.RsaKey, plaintext: bytes) -> bytes:
     k      = (pub_key.n.bit_length() + 7) // 8
     padded = plaintext.rjust(k, b'\x00')
@@ -126,7 +133,6 @@ def derive_aes_key(master_key: str) -> bytes:
 
 
 # ── AES symmetric encryption ────────────────────────────────────────────
-
 def aes_encrypt(key: bytes, plaintext: str) -> bytes:
     cipher = AES.new(key, AES.MODE_CBC)
     ct = cipher.encrypt(pad(plaintext.encode(), AES.block_size))
@@ -138,10 +144,25 @@ def aes_decrypt(key: bytes, ciphertext: bytes) -> str:
     cipher = AES.new(key, AES.MODE_CBC, iv)
     return unpad(cipher.decrypt(ct), AES.block_size).decode()
 
+# ── Function for handling valid deposit and withdrawal amounts (in float only) ────────────────────────────────────────────
+def get_valid_amount(prompt: str) -> float:
+    while True:
+        value = input(prompt).strip()
+        try:
+            amount = float(value)
+
+            if amount <= 0:
+                print("Amount must be greater than 0. Try again.")
+                continue
+
+            return amount
+
+        except ValueError:
+            print("Invalid input. Please enter a valid number (e.g., 100.50).")
+
+# Add to Server GUI, this is the main part that should be converted to a GUI.
 def phase3_menu(sock: socket.socket, my_id: str, enc_key: bytes, mac_key: bytes) -> None:
     logged_in = False
-
-    print("\n=== Phase 3 Starting ===")
 
     while True:
         if not logged_in:
@@ -150,25 +171,28 @@ def phase3_menu(sock: socket.socket, my_id: str, enc_key: bytes, mac_key: bytes)
             print("3. Exit")
             choice = input("Choose an option: ").strip()
 
+            # REGISTRATION (new user)
             if choice == "1":
                 username = input("Enter username: ").strip()
+                email = input("Enter email: ").strip()
                 password = input("Enter password: ").strip()
 
                 send_secure_utf(sock, enc_key, mac_key, {
                     "cmd": "REGISTER",
                     "username": username,
+                    "email": email,
                     "password": password
                 })
                 resp = recv_secure_utf(sock, enc_key, mac_key)
                 print(f"[{my_id}] Server response: {resp}")
-
+            #LOG IN (existing user)
             elif choice == "2":
-                username = input("Enter username: ").strip()
+                email = input("Enter email: ").strip()
                 password = input("Enter password: ").strip()
 
                 send_secure_utf(sock, enc_key, mac_key, {
                     "cmd": "LOGIN",
-                    "username": username,
+                    "email": email,
                     "password": password
                 })
                 resp = recv_secure_utf(sock, enc_key, mac_key)
@@ -176,7 +200,7 @@ def phase3_menu(sock: socket.socket, my_id: str, enc_key: bytes, mac_key: bytes)
 
                 if resp.get("status") == "ok":
                     logged_in = True
-
+            #EXIT the program
             elif choice == "3":
                 send_secure_utf(sock, enc_key, mac_key, {"cmd": "EXIT"})
                 resp = recv_secure_utf(sock, enc_key, mac_key)
@@ -185,37 +209,37 @@ def phase3_menu(sock: socket.socket, my_id: str, enc_key: bytes, mac_key: bytes)
 
             else:
                 print("Invalid option.")
-
+        # Once user logs in, they enter the Transaction menu
         else:
             print("\n1. Balance")
             print("2. Deposit")
             print("3. Withdraw")
             print("4. Logout")
             choice = input("Choose an option: ").strip()
-
+            # BALANCE QUERY (reads balance)
             if choice == "1":
                 send_secure_utf(sock, enc_key, mac_key, {"cmd": "BALANCE"})
                 resp = recv_secure_utf(sock, enc_key, mac_key)
                 print(f"[{my_id}] Server response: {resp}")
-
+            # DEPOSIT (adds to balance)
             elif choice == "2":
-                amount = input("Enter deposit amount: ").strip()
+                amount = get_valid_amount("Enter deposit amount: ")
                 send_secure_utf(sock, enc_key, mac_key, {
                     "cmd": "DEPOSIT",
                     "amount": amount
                 })
                 resp = recv_secure_utf(sock, enc_key, mac_key)
                 print(f"[{my_id}] Server response: {resp}")
-
+            # WITHDRAW (removes from balance)
             elif choice == "3":
-                amount = input("Enter withdrawal amount: ").strip()
+                amount = get_valid_amount("Enter withdrawal amount: ")
                 send_secure_utf(sock, enc_key, mac_key, {
                     "cmd": "WITHDRAW",
                     "amount": amount
                 })
                 resp = recv_secure_utf(sock, enc_key, mac_key)
                 print(f"[{my_id}] Server response: {resp}")
-
+            # LOG OUT (no longer perform transactions)
             elif choice == "4":
                 send_secure_utf(sock, enc_key, mac_key, {"cmd": "LOGOUT"})
                 resp = recv_secure_utf(sock, enc_key, mac_key)
@@ -225,16 +249,8 @@ def phase3_menu(sock: socket.socket, my_id: str, enc_key: bytes, mac_key: bytes)
             else:
                 print("Invalid option.")
 
-# ── Main ───────────────────────────────────────────────────────────────────────
-
-def main():
-    if len(sys.argv) < 2:
-        print('Usage: python ATMClient.py "Client A"')
-        sys.exit(1)
-
-    my_id = sys.argv[1]
-    print(f"---- ATM Client [{my_id}] ----\n")
-
+# Key Distribution (Phases 1 and 2)
+def key_distribution(my_id: str):
     # Generate RSA-2048 key pair for this client
     kp          = RSA.generate(2048)
     my_pub_key  = kp.publickey()
@@ -244,7 +260,6 @@ def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((KDC_HOST, KDC_PORT))
     print(f"[{my_id}] Connected to Bank Server at {KDC_HOST}:{KDC_PORT}\n")
-
     # ── Step 1 : send our RSA public key ──────────────────────────────────────
     send_msg(sock, my_pub_key.export_key(format="DER"))
 
@@ -324,9 +339,22 @@ def main():
 
 
     print(f"=== Phase 2 Complete. [{my_id}] holds Encryption Key = {enc_key} and MAC Key {mac_key} ===")
+    return enc_key, mac_key, sock
 
-    # Phase 3: Prompt User to enter Username and Pasword
+# ── Main ───────────────────────────────────────────────────────────────────────
 
+def main():
+    if len(sys.argv) < 2:
+        print('Usage: python ATMClient.py "Client A"')
+        sys.exit(1)
+
+    my_id = sys.argv[1]
+    print(f"---- ATM Client [{my_id}] ----\n")
+
+    # Key Distribution protocol to ensure secure connection between ATM and Bank Server, and encryption key (session key) and mac key for user transactions are distributed.
+    enc_key, mac_key, sock = key_distribution(my_id)
+
+    # Phase 3 and 4: Prompt User to enter Username and Password or register, once logged in they enter the transaction menu
     phase3_menu(sock, my_id, enc_key, mac_key)
 
     sock.close()

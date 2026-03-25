@@ -11,12 +11,11 @@ Phase 1 — Mutual Authentication & Master Key Distribution (per client)
   4.  Server → ATM  : Message 1  E(PU_ATM,  [NK1 || ID_BS])
   5.  ATM  → Server : Message 2  E(PU_BS,  [N_ATM || N_BS1])
   6.  Server → ATM  : Message 3  E(PU_ATM,  N_BS1)
-  7.  Server → ATM  : Message 4  E(PU_ATM,  E(PR_BS, MasterKey))
+  7.  Server → ATM  : Message 4  E(PU_ATM, MasterKey))
 
-Phase 2 — Session Key Distribution
-  - The first ATM to send IDA + IDB triggers KAB generation.
-  - Server sends E(KA, [KAB || IDB]) to the requesting ATM.
-  - Server sends E(KB, [KAB || IDA]) to the other ATM via its stored socket.
+Phase 2 — Encryption and MAC Key Distribution
+  - The first ATM to send their ID triggers Encryption Key and MAC key generation.
+  - Server sends E(KA, [EK || MAC]) to the requesting ATM.
 
 Usage:
     python BankServer.py
@@ -28,15 +27,27 @@ import random
 import base64
 import struct
 
+
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from Crypto.Random import get_random_bytes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
+import firebase_admin
+from firebase_admin import credentials, auth, firestore
 import json
 import hashlib
 import hmac
+import requests
+import time
+
+FIREBASE_WEB_API_KEY = "AIzaSyARAls5fAoiZp5YxmIrbhSMVHttICli1Jg"
+
+cred = credentials.Certificate("serviceAccountKey.json")
+firebase_admin.initialize_app(cred)
+
+db = firestore.client()
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 HOST = "localhost"
@@ -47,34 +58,61 @@ ID_K = "KDCServer"
 state_lock  = threading.Condition()
 master_keys: dict[str, str]           = {}   # clientID → master key string
 client_outs: dict[str, socket.socket] = {}   # clientID → socket
-users_db: dict[str, dict] = {}   # username -> {"password_hash": str, "balance": float}
-users_lock = threading.Lock()
 
-# Send and receive utf helpers using encryption and mac keys -------------------
+def get_balance_doc_ref(uid: str):
+    return db.collection("userBalances").document(uid)
+
+# Audit Log to store Audit records of User actions
+def log_audit_event(uid: str, email: str, action: str) -> None:
+    """
+    Stores an audit record in Firestore.
+    """
+    db.collection("auditLogs").add({
+        "userID": uid,
+        "email": email,
+        "action": action,
+        "time": firestore.SERVER_TIMESTAMP
+    })
+
+    # Add to Server GUI
+    if "BALANCE_INQUIRY" in action:
+        print(f"{email} performed {action} at {time.ctime()}")
+    else:
+        print(f"{email} {action} at {time.ctime()}")
+    
+# performs a hash of the data using the mac_key to ensure data integrity later
 def hmac_sha256(key: bytes, data: bytes) -> bytes:
     return hmac.new(key, data, hashlib.sha256).digest()
 
+# send secure utf performs the encryption using the encryption key, tags the hashed message with the mac key, and sends the utf
 def send_secure_utf(sock: socket.socket, enc_key: bytes, mac_key: bytes, obj: dict) -> None:
+    # converts a python dictionary into a json object, encrypts that using the encryption key.
     plaintext = json.dumps(obj)
-    ciphertext = aes_encrypt(enc_key, plaintext)   # returns bytes
+    ciphertext = aes_encrypt(enc_key, plaintext)
+    # generates a hash of the encrypted message using the mac key.
     tag = hmac_sha256(mac_key, ciphertext)
 
     packet = {
         "ct": base64.b64encode(ciphertext).decode("utf-8"),
         "tag": base64.b64encode(tag).decode("utf-8")
     }
+
+    # sends the packet as a json object to the other side of the connection.
     send_utf(sock, json.dumps(packet))
 
+# receive secure utf performs the decryption using the encryption key to get the message, verifies the data integrity using the tag hashed by the mac key.
 def recv_secure_utf(sock: socket.socket, enc_key: bytes, mac_key: bytes) -> dict:
     packet = json.loads(recv_utf(sock))
 
     ciphertext = base64.b64decode(packet["ct"])
     tag = base64.b64decode(packet["tag"])
 
+    # Message Verification by verifying the tag with the message with the hash of the original message received (Data Integrity)
     expected_tag = hmac_sha256(mac_key, ciphertext)
     if not hmac.compare_digest(tag, expected_tag):
         raise ValueError("MAC verification failed")
 
+    # Decrypts the message using the encryption key and returns the string.
     plaintext = aes_decrypt(enc_key, ciphertext)   # returns str
     return json.loads(plaintext)
 
@@ -96,6 +134,7 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
         buf += chunk
     return buf
 
+# send and receive utf functions to more accurately transmit messages as bytes and display received messages.
 def send_utf(sock: socket.socket, s: str) -> None:
     send_msg(sock, s.encode("utf-8"))
 
@@ -238,110 +277,217 @@ def key_distribution(conn: socket.socket, kdc_pub: RSA.RsaKey, kdc_priv: RSA.Rsa
 
         return enc_key, mac_key, client_id
 
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+def firebase_register_user(email: str, password: str, username: str) -> tuple[bool, str, str | None]:
+    """
+    Creates a Firebase Auth user and a Firestore balance doc.
+    Returns (ok, message, uid)
+    """
+    try:
+        user_record = auth.create_user(
+            email=email,
+            password=password,
+            display_name=username
+        )
+        uid = user_record.uid
 
+        db.collection("userBalances").document(uid).set({
+            "userID": uid,
+            "username": username,
+            "email": email,
+            "balance": 0.0,
+            "lastUpdated": firestore.SERVER_TIMESTAMP
+        })
+
+        return True, "Registration successful", uid
+
+    except Exception as e:
+        return False, f"Registration failed: {e}", None
+
+
+def firebase_login_user(email: str, password: str) -> tuple[bool, str, str | None]:
+    """
+    Uses Firebase Auth REST API to sign in with email/password.
+    Returns (ok, message, uid)
+    """
+    url = (
+        "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
+        f"?key={FIREBASE_WEB_API_KEY}"
+    )
+
+    payload = {
+        "email": email,
+        "password": password,
+        "returnSecureToken": True
+    }
+
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        data = r.json()
+
+        if r.status_code == 200:
+            uid = data["localId"]   # Firebase UID
+            return True, "Login successful", uid
+
+        msg = data.get("error", {}).get("message", "Login failed")
+        return False, msg, None
+
+    except Exception as e:
+        return False, f"Login failed: {e}", None
+
+
+def get_balance_doc_ref(uid: str):
+    """
+    Returns a Firestore document reference for this uid.
+    Assumes document ID == uid.
+    """
+    return db.collection("userBalances").document(uid)
+
+
+# This is where the Server handles ATM menu requests and Transaction Menu requests, resp are the responses given by the server to the ATM, 
+# which are formatted in a dictionary and sent via the secure utf.
 def process_phase3(conn: socket.socket, client_id: str, enc_key: bytes, mac_key: bytes) -> None:
     print(f"=== Phase 3 Starting for {client_id} ===\n")
-    authenticated_user = None
+    authenticated_uid = None
+    authenticated_email = None
 
     while True:
         try:
             req = recv_secure_utf(conn, enc_key, mac_key)
             cmd = req.get("cmd", "").upper()
-
+            # ATM Menu
             if cmd == "EXIT":
-                send_secure_utf(conn, enc_key, mac_key, {
+                resp = {
                     "status": "ok",
                     "msg": "Goodbye"
-                })
+                }
+                send_secure_utf(conn, enc_key, mac_key, resp)
                 print(f"[Phase 3] {client_id} exited.")
                 break
 
             elif cmd == "REGISTER":
                 username = req.get("username", "").strip()
+                email = req.get("email", "").strip()
                 password = req.get("password", "").strip()
 
-                if not username or not password:
-                    resp = {"status": "error", "msg": "Username/password cannot be empty"}
+                if not username or not email or not password:
+                    resp = {
+                        "status": "error",
+                        "msg": "Username, email, and password are required"
+                    }
                 else:
-                    with users_lock:
-                        if username in users_db:
-                            resp = {"status": "error", "msg": "User already exists"}
-                        else:
-                            users_db[username] = {
-                                "password_hash": hash_password(password),
-                                "balance": 0.0
-                            }
-                            resp = {"status": "ok", "msg": "Registration successful"}
+                    ok, msg, uid = firebase_register_user(email, password, username)
+                    if ok:
+                        resp = {"status": "ok", "msg": msg, "uid": uid}
+                    else:
+                        resp = {"status": "error", "msg": msg}
 
                 send_secure_utf(conn, enc_key, mac_key, resp)
 
             elif cmd == "LOGIN":
-                username = req.get("username", "").strip()
+                email = req.get("email", "").strip()
                 password = req.get("password", "").strip()
 
-                with users_lock:
-                    if username not in users_db:
-                        resp = {"status": "error", "msg": "Unknown user"}
-                    elif not hmac.compare_digest(
-                        users_db[username]["password_hash"],
-                        hash_password(password)
-                    ):
-                        resp = {"status": "error", "msg": "Invalid credentials"}
+                if not email or not password:
+                    resp = {"status": "error", "msg": "Email and password are required"}
+                else:
+                    ok, msg, uid = firebase_login_user(email, password)
+                    if ok:
+                        authenticated_uid = uid
+                        authenticated_email = email
+                        resp = {"status": "ok", "msg": msg, "uid": uid}
                     else:
-                        authenticated_user = username
-                        resp = {"status": "ok", "msg": "Login successful"}
+                        resp = {"status": "error", "msg": msg}
 
                 send_secure_utf(conn, enc_key, mac_key, resp)
+
             elif cmd == "LOGOUT":
-                authenticated_user = None
+                # use userid and email to log out before it is changed to None
+                log_audit_event(authenticated_uid, authenticated_email, f"LOGGED OUT")
+                authenticated_uid = None
+                authenticated_email = None
                 send_secure_utf(conn, enc_key, mac_key, {
                     "status": "ok",
                     "msg": "Logged out successfully"
                 })
+
             else:
-                if authenticated_user is None:
+                # Transaction Menu
+                if authenticated_uid is None:
                     send_secure_utf(conn, enc_key, mac_key, {
                         "status": "error",
                         "msg": "Please log in first"
                     })
                     continue
 
-                with users_lock:
-                    balance = users_db[authenticated_user]["balance"]
+                ref = get_balance_doc_ref(authenticated_uid)
+                snap = ref.get()
 
-                    if cmd == "BALANCE":
-                        resp = {"status": "ok", "balance": balance}
+                if not snap.exists:
+                    send_secure_utf(conn, enc_key, mac_key, {
+                        "status": "error",
+                        "msg": "User balance document not found"
+                    })
+                    continue
 
-                    elif cmd == "DEPOSIT":
-                        amount = float(req.get("amount", 0))
-                        if amount <= 0:
-                            resp = {"status": "error", "msg": "Amount must be positive"}
-                        else:
-                            users_db[authenticated_user]["balance"] += amount
-                            resp = {
-                                "status": "ok",
-                                "balance": users_db[authenticated_user]["balance"]
-                            }
-                            print(f"[TX] {authenticated_user} deposited ${amount:.2f}")
+                current = snap.to_dict()
+                balance = float(current.get("balance", 0.0))
 
-                    elif cmd == "WITHDRAW":
-                        amount = float(req.get("amount", 0))
-                        if amount <= 0:
-                            resp = {"status": "error", "msg": "Amount must be positive"}
-                        elif amount > balance:
-                            resp = {"status": "error", "msg": "Insufficient funds"}
-                        else:
-                            users_db[authenticated_user]["balance"] -= amount
-                            resp = {
-                                "status": "ok",
-                                "balance": users_db[authenticated_user]["balance"]
-                            }
-                            print(f"[TX] {authenticated_user} withdrew ${amount:.2f}")
+                if cmd == "BALANCE":
+                    # Record audit event for balance inquiry
+                    log_audit_event(authenticated_uid, authenticated_email, "BALANCE INQUIRY")
 
+                    # Optional: also update lastUpdated on inquiry
+                    ref.update({
+                        "lastUpdated": firestore.SERVER_TIMESTAMP
+                    })
+
+                    resp = {
+                        "status": "ok",
+                        "balance": balance,
+                        "email": authenticated_email,
+                        "uid": authenticated_uid
+                    }
+
+                elif cmd == "DEPOSIT":
+                    amount = float(req.get("amount", 0))
+                    if amount <= 0:
+                        resp = {"status": "error", "msg": "Amount must be positive"}
                     else:
-                        resp = {"status": "error", "msg": "Unknown command"}
+                        new_balance = balance + amount
+                        ref.update({
+                            "balance": new_balance,
+                            "lastUpdated": firestore.SERVER_TIMESTAMP
+                        })
+
+                        log_audit_event(authenticated_uid, authenticated_email, f"DEPOSITED: {amount:.2f}")
+
+                        resp = {
+                            "status": "ok",
+                            "balance": new_balance
+                        }
+
+                elif cmd == "WITHDRAW":
+                    amount = float(req.get("amount", 0))
+                    if amount <= 0:
+                        resp = {"status": "error", "msg": "Amount must be positive"}
+                    elif amount > balance:
+                        resp = {"status": "error", "msg": "Insufficient funds"}
+                    else:
+                        new_balance = balance - amount
+                        ref.update({
+                            "balance": new_balance,
+                            "lastUpdated": firestore.SERVER_TIMESTAMP
+                        })
+
+                        log_audit_event(authenticated_uid, authenticated_email, f"WITHDREW: {amount:.2f}")
+
+                        resp = {
+                            "status": "ok",
+                            "balance": new_balance
+                        }
+
+                else:
+                    resp = {"status": "error", "msg": "Unknown command"}
 
                 send_secure_utf(conn, enc_key, mac_key, resp)
 
