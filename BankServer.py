@@ -26,6 +26,7 @@ import threading
 import random
 import base64
 import struct
+from typing import Optional
 
 
 from Crypto.PublicKey import RSA
@@ -34,24 +35,23 @@ from Crypto.Util.Padding import pad, unpad
 from Crypto.Random import get_random_bytes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
-import firebase_admin
-from firebase_admin import credentials, auth, firestore
 import json
 import hashlib
 import hmac
 import requests
 import time
+from secure_banking.config import get_bank_server_host, get_bank_server_port
+from secure_banking.firebase_support import get_firebase_context
 
-FIREBASE_WEB_API_KEY = "AIzaSyARAls5fAoiZp5YxmIrbhSMVHttICli1Jg"
-
-cred = credentials.Certificate("serviceAccountKey.json")
-firebase_admin.initialize_app(cred)
-
-db = firestore.client()
+firebase_context = get_firebase_context()
+auth = firebase_context.auth
+db = firebase_context.db
+firestore = firebase_context.firestore
+FIREBASE_WEB_API_KEY = firebase_context.web_api_key
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-HOST = "localhost"
-PORT = 1234
+HOST = get_bank_server_host()
+PORT = get_bank_server_port()
 ID_K = "KDCServer"
 
 # ── Shared state (protected by state_lock) ─────────────────────────────────────
@@ -67,6 +67,9 @@ def log_audit_event(uid: str, email: str, action: str) -> None:
     """
     Stores an audit record in Firestore.
     """
+    if not uid or not email:
+        return
+
     db.collection("auditLogs").add({
         "userID": uid,
         "email": email,
@@ -74,11 +77,21 @@ def log_audit_event(uid: str, email: str, action: str) -> None:
         "time": firestore.SERVER_TIMESTAMP
     })
 
-    # Add to Server GUI
-    if "BALANCE_INQUIRY" in action:
-        print(f"{email} performed {action} at {time.ctime()}")
-    else:
-        print(f"{email} {action} at {time.ctime()}")
+    print(f"{email} {action} at {time.ctime()}")
+
+
+def friendly_auth_error(message: str) -> str:
+    normalized = str(message)
+    lowered = normalized.lower()
+
+    if "already exists" in lowered or "email_exists" in lowered:
+        return "An account with this email already exists."
+    if "password should be at least" in lowered or "weak_password" in lowered:
+        return "Password must be at least 6 characters."
+    if "invalid email" in lowered or "invalid_email" in lowered:
+        return "Enter a valid email address."
+
+    return normalized
     
 # performs a hash of the data using the mac_key to ensure data integrity later
 def hmac_sha256(key: bytes, data: bytes) -> bytes:
@@ -277,7 +290,7 @@ def key_distribution(conn: socket.socket, kdc_pub: RSA.RsaKey, kdc_priv: RSA.Rsa
 
         return enc_key, mac_key, client_id
 
-def firebase_register_user(email: str, password: str, username: str) -> tuple[bool, str, str | None]:
+def firebase_register_user(email: str, password: str, username: str) -> tuple[bool, str, Optional[str]]:
     """
     Creates a Firebase Auth user and a Firestore balance doc.
     Returns (ok, message, uid)
@@ -301,10 +314,10 @@ def firebase_register_user(email: str, password: str, username: str) -> tuple[bo
         return True, "Registration successful", uid
 
     except Exception as e:
-        return False, f"Registration failed: {e}", None
+        return False, friendly_auth_error(str(e)), None
 
 
-def firebase_login_user(email: str, password: str) -> tuple[bool, str, str | None]:
+def firebase_login_user(email: str, password: str) -> tuple[bool, str, Optional[str]]:
     """
     Uses Firebase Auth REST API to sign in with email/password.
     Returns (ok, message, uid)
@@ -401,8 +414,8 @@ def process_phase3(conn: socket.socket, client_id: str, enc_key: bytes, mac_key:
                 send_secure_utf(conn, enc_key, mac_key, resp)
 
             elif cmd == "LOGOUT":
-                # use userid and email to log out before it is changed to None
-                log_audit_event(authenticated_uid, authenticated_email, f"LOGGED OUT")
+                if authenticated_uid and authenticated_email:
+                    log_audit_event(authenticated_uid, authenticated_email, "LOGGED OUT")
                 authenticated_uid = None
                 authenticated_email = None
                 send_secure_utf(conn, enc_key, mac_key, {
@@ -433,14 +446,6 @@ def process_phase3(conn: socket.socket, client_id: str, enc_key: bytes, mac_key:
                 balance = float(current.get("balance", 0.0))
 
                 if cmd == "BALANCE":
-                    # Record audit event for balance inquiry
-                    log_audit_event(authenticated_uid, authenticated_email, "BALANCE INQUIRY")
-
-                    # Optional: also update lastUpdated on inquiry
-                    ref.update({
-                        "lastUpdated": firestore.SERVER_TIMESTAMP
-                    })
-
                     resp = {
                         "status": "ok",
                         "balance": balance,
@@ -508,6 +513,10 @@ class ClientHandler(threading.Thread):
     def run(self):
         try:
             self._handle()
+        except ConnectionError as e:
+            # The admin health check probes the socket port and then closes immediately.
+            if str(e) != "Socket closed unexpectedly":
+                print(f"[KDC] Connection error in handler for client #{self.client_number}: {e}")
         except Exception as e:
             print(f"[KDC] Error in handler for client #{self.client_number}: {e}")
         finally:

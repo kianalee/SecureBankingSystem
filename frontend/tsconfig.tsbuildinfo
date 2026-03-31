@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/components/panel.tsx","./src/components/statusbadge.tsx","./src/lib/api.ts","./src/lib/format.ts","./src/routes/admindashboard.test.tsx","./src/routes/admindashboard.tsx","./src/routes/atmdashboard.test.tsx","./src/routes/atmdashboard.tsx","./src/test/setup.ts"],"version":"5.9.3"}
