@@ -181,12 +181,13 @@ class ATMProtocolClient:
             raise RuntimeError("ATM session is not connected.")
         return self.sock
 
-    def _send_command_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _send_command_locked(self, payload: Dict[str, Any], *, record_last_action: bool = True) -> Dict[str, Any]:
         sock = self._assert_connected()
         send_secure_utf(sock, self.enc_key, self.mac_key, payload)
         response = recv_secure_utf(sock, self.enc_key, self.mac_key)
-        self.last_action = payload.get("cmd", "").upper()
-        self.last_activity_at = utcnow_iso()
+        if record_last_action:
+            self.last_action = payload.get("cmd", "").upper()
+            self.last_activity_at = utcnow_iso()
         return response
 
     def connect(self, client_id: str) -> Dict[str, Any]:
@@ -299,10 +300,11 @@ class ATMProtocolClient:
             self._record("phase3", "Logout", response.get("msg", ""))
             return response
 
-    def balance(self) -> Dict[str, Any]:
+    def balance(self, record_activity: bool = True) -> Dict[str, Any]:
         with self._lock:
-            response = self._send_command_locked({"cmd": "BALANCE"})
-            self._record("phase3", "Balance inquiry", "Latest balance retrieved from the bank server.")
+            response = self._send_command_locked({"cmd": "BALANCE"}, record_last_action=record_activity)
+            if record_activity:
+                self._record("phase3", "Balance inquiry", "Latest balance retrieved from the bank server.")
             return response
 
     def deposit(self, amount: float) -> Dict[str, Any]:

@@ -40,6 +40,7 @@ import hashlib
 import hmac
 import requests
 import time
+from secure_banking.audit_support import append_audit_log_entry
 from secure_banking.config import get_bank_server_host, get_bank_server_port
 from secure_banking.firebase_support import get_firebase_context
 
@@ -58,6 +59,17 @@ ID_K = "KDCServer"
 state_lock  = threading.Condition()
 master_keys: dict[str, str]           = {}   # clientID → master key string
 client_outs: dict[str, socket.socket] = {}   # clientID → socket
+account_locks: dict[str, threading.Lock] = {}
+account_locks_guard = threading.Lock()
+
+
+def get_account_lock(uid: str) -> threading.Lock:
+    with account_locks_guard:
+        lock = account_locks.get(uid)
+        if lock is None:
+            lock = threading.Lock()
+            account_locks[uid] = lock
+        return lock
 
 def get_balance_doc_ref(uid: str):
     return db.collection("userBalances").document(uid)
@@ -76,6 +88,7 @@ def log_audit_event(uid: str, email: str, action: str) -> None:
         "action": action,
         "time": firestore.SERVER_TIMESTAMP
     })
+    append_audit_log_entry(uid, email, action)
 
     print(f"{email} {action} at {time.ctime()}")
 
@@ -433,66 +446,74 @@ def process_phase3(conn: socket.socket, client_id: str, enc_key: bytes, mac_key:
                     continue
 
                 ref = get_balance_doc_ref(authenticated_uid)
-                snap = ref.get()
+                with get_account_lock(authenticated_uid):
+                    snap = ref.get()
 
-                if not snap.exists:
-                    send_secure_utf(conn, enc_key, mac_key, {
-                        "status": "error",
-                        "msg": "User balance document not found"
-                    })
-                    continue
-
-                current = snap.to_dict()
-                balance = float(current.get("balance", 0.0))
-
-                if cmd == "BALANCE":
-                    resp = {
-                        "status": "ok",
-                        "balance": balance,
-                        "email": authenticated_email,
-                        "uid": authenticated_uid
-                    }
-
-                elif cmd == "DEPOSIT":
-                    amount = float(req.get("amount", 0))
-                    if amount <= 0:
-                        resp = {"status": "error", "msg": "Amount must be positive"}
-                    else:
-                        new_balance = balance + amount
-                        ref.update({
-                            "balance": new_balance,
-                            "lastUpdated": firestore.SERVER_TIMESTAMP
+                    if not snap.exists:
+                        send_secure_utf(conn, enc_key, mac_key, {
+                            "status": "error",
+                            "msg": "User balance document not found"
                         })
+                        continue
 
-                        log_audit_event(authenticated_uid, authenticated_email, f"DEPOSITED: {amount:.2f}")
+                    current = snap.to_dict()
+                    balance = float(current.get("balance", 0.0))
 
+                    if cmd == "BALANCE":
                         resp = {
                             "status": "ok",
-                            "balance": new_balance
+                            "balance": balance,
+                            "email": authenticated_email,
+                            "uid": authenticated_uid,
+                            "clientId": client_id,
                         }
 
-                elif cmd == "WITHDRAW":
-                    amount = float(req.get("amount", 0))
-                    if amount <= 0:
-                        resp = {"status": "error", "msg": "Amount must be positive"}
-                    elif amount > balance:
-                        resp = {"status": "error", "msg": "Insufficient funds"}
+                    elif cmd == "DEPOSIT":
+                        amount = float(req.get("amount", 0))
+                        if amount <= 0:
+                            resp = {"status": "error", "msg": "Amount must be positive"}
+                        else:
+                            new_balance = balance + amount
+                            ref.update({
+                                "balance": new_balance,
+                                "lastUpdated": firestore.SERVER_TIMESTAMP
+                            })
+
+                            log_audit_event(authenticated_uid, authenticated_email, f"DEPOSITED: {amount:.2f}")
+
+                            resp = {
+                                "status": "ok",
+                                "balance": new_balance,
+                                "email": authenticated_email,
+                                "uid": authenticated_uid,
+                                "clientId": client_id,
+                            }
+
+                    elif cmd == "WITHDRAW":
+                        amount = float(req.get("amount", 0))
+                        if amount <= 0:
+                            resp = {"status": "error", "msg": "Amount must be positive"}
+                        elif amount > balance:
+                            resp = {"status": "error", "msg": "Insufficient funds"}
+                        else:
+                            new_balance = balance - amount
+                            ref.update({
+                                "balance": new_balance,
+                                "lastUpdated": firestore.SERVER_TIMESTAMP
+                            })
+
+                            log_audit_event(authenticated_uid, authenticated_email, f"WITHDREW: {amount:.2f}")
+
+                            resp = {
+                                "status": "ok",
+                                "balance": new_balance,
+                                "email": authenticated_email,
+                                "uid": authenticated_uid,
+                                "clientId": client_id,
+                            }
+
                     else:
-                        new_balance = balance - amount
-                        ref.update({
-                            "balance": new_balance,
-                            "lastUpdated": firestore.SERVER_TIMESTAMP
-                        })
-
-                        log_audit_event(authenticated_uid, authenticated_email, f"WITHDREW: {amount:.2f}")
-
-                        resp = {
-                            "status": "ok",
-                            "balance": new_balance
-                        }
-
-                else:
-                    resp = {"status": "error", "msg": "Unknown command"}
+                        resp = {"status": "error", "msg": "Unknown command"}
 
                 send_secure_utf(conn, enc_key, mac_key, resp)
 

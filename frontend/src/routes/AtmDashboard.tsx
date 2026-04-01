@@ -2,7 +2,7 @@ import { FormEvent, startTransition, useDeferredValue, useEffect, useState } fro
 
 import { Panel } from "../components/Panel";
 import { StatusBadge } from "../components/StatusBadge";
-import { deleteJson, getJson, postJson } from "../lib/api";
+import { deleteJson, getJson, postJson, setAtmSessionToken } from "../lib/api";
 import { formatCurrency, formatTimestamp } from "../lib/format";
 
 type ProtocolEvent = {
@@ -31,11 +31,15 @@ type SessionStatus = {
 
 type BalanceData = {
   balance?: number;
+  email?: string;
+  uid?: string;
+  clientId?: string;
 };
 
 export function AtmDashboard() {
   const [sessionStatus, setSessionStatus] = useState<SessionStatus | null>(null);
   const [balance, setBalance] = useState<number | null>(null);
+  const [accountEmail, setAccountEmail] = useState<string | null>(null);
   const [message, setMessage] = useState("Connect to start.");
   const [busy, setBusy] = useState(false);
   const [connectClientId, setConnectClientId] = useState("ATM Aurora");
@@ -54,10 +58,12 @@ export function AtmDashboard() {
       });
 
       if (payload.data.authenticated) {
-        const balancePayload = await getJson<BalanceData>("/api/account/balance");
+        const balancePayload = await getJson<BalanceData>("/api/account/balance?silent=1");
         setBalance(balancePayload.data.balance ?? null);
+        setAccountEmail(balancePayload.data.email ?? null);
       } else {
         setBalance(null);
+        setAccountEmail(null);
       }
       if (!silent) {
         setMessage(payload.message);
@@ -93,12 +99,14 @@ export function AtmDashboard() {
     try {
       const payload = await postJson<{
         session: object;
+        sessionToken: string;
         protocolEvents: ProtocolEvent[];
         phase: string;
         protocolSummary: SessionStatus["protocolSummary"];
       }>("/api/session/connect", {
         clientId: connectClientId,
       });
+      setAtmSessionToken(payload.data.sessionToken);
 
       setSessionStatus({
         clientId: connectClientId,
@@ -109,6 +117,7 @@ export function AtmDashboard() {
         protocolSummary: payload.data.protocolSummary,
       });
       setBalance(null);
+      setAccountEmail(null);
       setMessage(payload.message);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Unable to connect ATM session.");
@@ -151,9 +160,12 @@ export function AtmDashboard() {
     setBusy(true);
     try {
       const path = kind === "deposit" ? "/api/account/deposit" : "/api/account/withdraw";
-      const payload = await postJson<{ balance?: number }>(path, { amount: numericAmount });
+      const payload = await postJson<BalanceData>(path, { amount: numericAmount });
       if (typeof payload.data.balance === "number") {
         setBalance(payload.data.balance);
+      }
+      if (typeof payload.data.email === "string") {
+        setAccountEmail(payload.data.email);
       }
       setMessage(payload.message);
       await refreshStatus(true);
@@ -188,6 +200,8 @@ export function AtmDashboard() {
       setBusy(false);
       setSessionStatus(null);
       setBalance(null);
+      setAccountEmail(null);
+      setAtmSessionToken(null);
     }
   }
 
@@ -195,36 +209,49 @@ export function AtmDashboard() {
   const authTone = sessionStatus?.authenticated ? "good" : "warn";
 
   return (
-    <main className="page-grid">
-      <section className="hero-card">
-        <p className="eyebrow">ATM</p>
-        <h2>Simple secure banking.</h2>
-        <p className="lead">Connect, sign in, and move money.</p>
+    <main className="page-grid atm-layout">
+      <section className="hero-card compact-hero">
+        <div className="hero-copy-row">
+        </div>
 
-        <div className="hero-stats">
-          <div>
-            <span>Channel</span>
-            <strong>{deferredStatus?.protocolSummary.secureChannel ? "Established" : "Waiting"}</strong>
+        <div className="hero-info-row">
+          <div className="hero-stats compact-stats">
+            <div>
+              <span>Channel</span>
+              <strong>{deferredStatus?.protocolSummary.secureChannel ? "Established" : "Waiting"}</strong>
+            </div>
+            <div>
+              <span>Access</span>
+              <strong>{deferredStatus?.authenticated ? "Signed in" : "Guest"}</strong>
+            </div>
+            <div>
+              <span>Balance</span>
+              <strong>{formatCurrency(balance)}</strong>
+            </div>
           </div>
-          <div>
-            <span>Access</span>
-            <strong>{deferredStatus?.authenticated ? "Signed in" : "Guest"}</strong>
-          </div>
-          <div>
-            <span>Balance</span>
-            <strong>{formatCurrency(balance)}</strong>
+
+          <div className="hero-side">
+            <div className="inline-status-row">
+              <StatusBadge tone={connectionTone}>{sessionStatus?.connected ? "Connected" : "Disconnected"}</StatusBadge>
+              <StatusBadge tone={authTone}>{sessionStatus?.authenticated ? "Signed in" : "Guest"}</StatusBadge>
+            </div>
+            <p className="status-message">{message}</p>
           </div>
         </div>
 
-        <div className="inline-status-row">
-          <StatusBadge tone={connectionTone}>{sessionStatus?.connected ? "Connected" : "Disconnected"}</StatusBadge>
-          <StatusBadge tone={authTone}>{sessionStatus?.authenticated ? "Signed in" : "Guest"}</StatusBadge>
+        <div className="identity-strip" aria-label="Session identity">
+          <div className="identity-card">
+            <span>Terminal</span>
+            <strong>{sessionStatus?.clientId ?? "Not connected"}</strong>
+          </div>
+          <div className="identity-card">
+            <span>Customer</span>
+            <strong>{accountEmail ?? "Not signed in"}</strong>
+          </div>
         </div>
-
-        <p className="status-message">{message}</p>
       </section>
 
-      <Panel title="Connect">
+      <Panel title="Connect" className="compact-panel">
         <form className="stack" onSubmit={handleConnect}>
           <label className="field">
             <span>Client ID</span>
@@ -245,7 +272,7 @@ export function AtmDashboard() {
         </form>
       </Panel>
 
-      <Panel title={authMode === "register" ? "Create account" : "Sign in"}>
+      <Panel title={authMode === "register" ? "Create account" : "Sign in"} className="compact-panel">
         <div className="segmented-control" role="tablist" aria-label="Authentication mode">
           <button
             type="button"
@@ -289,7 +316,7 @@ export function AtmDashboard() {
         </form>
       </Panel>
 
-      <Panel title="Account" className="wide-panel">
+      <Panel title="Account" className="compact-panel account-panel">
         <div className="account-grid">
           <div className="balance-card">
             <span>Balance</span>
@@ -322,7 +349,7 @@ export function AtmDashboard() {
         </div>
       </Panel>
 
-      <Panel title="Session" className="wide-panel">
+      <Panel title="Session" className="wide-panel session-panel">
         <div className="meta-grid">
           <div>
             <span className="meta-label">Connected</span>

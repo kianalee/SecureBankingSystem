@@ -14,6 +14,7 @@ class FakeATMProtocolClient:
         self.phase = "disconnected"
         self.protocol_events = []
         self.last_action = None
+        self.balance_calls = []
 
     def connect(self, client_id: str):
         self.client_id = client_id
@@ -45,8 +46,10 @@ class FakeATMProtocolClient:
         self.last_action = "LOGOUT"
         return {"status": "ok", "msg": "Logged out successfully"}
 
-    def balance(self):
-        self.last_action = "BALANCE"
+    def balance(self, record_activity: bool = True):
+        self.balance_calls.append(record_activity)
+        if record_activity:
+            self.last_action = "BALANCE"
         return {"status": "ok", "balance": self.balance_value}
 
     def deposit(self, amount: float):
@@ -103,27 +106,51 @@ def create_client(monkeypatch):
     return TestClient(gateway.app)
 
 
+def auth_headers(connect_response):
+    token = connect_response.json()["data"]["sessionToken"]
+    return {"X-Session": token}
+
+
 def test_connect_then_query_balance(monkeypatch):
     client = create_client(monkeypatch)
 
     connect_response = client.post("/api/session/connect", json={"clientId": "ATM Aurora"})
     assert connect_response.status_code == 200
     assert connect_response.json()["status"] == "ok"
+    headers = auth_headers(connect_response)
 
-    login_response = client.post("/api/auth/login", json={"email": "person@example.com", "password": "password123"})
+    login_response = client.post("/api/auth/login", headers=headers, json={"email": "person@example.com", "password": "password123"})
     assert login_response.status_code == 200
     assert login_response.json()["data"]["uid"] == "uid-1"
 
-    balance_response = client.get("/api/account/balance")
+    balance_response = client.get("/api/account/balance", headers=headers)
     assert balance_response.status_code == 200
     assert balance_response.json()["data"]["balance"] == 880.0
 
 
+def test_silent_balance_does_not_overwrite_last_action(monkeypatch):
+    client = create_client(monkeypatch)
+
+    connect_response = client.post("/api/session/connect", json={"clientId": "ATM Aurora"})
+    headers = auth_headers(connect_response)
+
+    login_response = client.post("/api/auth/login", headers=headers, json={"email": "person@example.com", "password": "password123"})
+    assert login_response.status_code == 200
+
+    silent_balance_response = client.get("/api/account/balance?silent=1", headers=headers)
+    assert silent_balance_response.status_code == 200
+
+    status_response = client.get("/api/session/status", headers=headers)
+    assert status_response.status_code == 200
+    assert status_response.json()["data"]["lastAction"] == "LOGIN"
+
+
 def test_invalid_amount_rejected(monkeypatch):
     client = create_client(monkeypatch)
-    client.post("/api/session/connect", json={"clientId": "ATM Aurora"})
+    connect_response = client.post("/api/session/connect", json={"clientId": "ATM Aurora"})
+    headers = auth_headers(connect_response)
 
-    response = client.post("/api/account/deposit", json={"amount": 0})
+    response = client.post("/api/account/deposit", headers=headers, json={"amount": 0})
     assert response.status_code == 400
     assert response.json()["message"] == "Amount must be greater than 0."
 
@@ -156,3 +183,17 @@ def test_session_peek_returns_guest_without_cookie(monkeypatch):
     response = client.get("/api/session/peek")
     assert response.status_code == 200
     assert response.json()["data"]["connected"] is False
+
+
+def test_connect_without_explicit_token_does_not_replace_other_session(monkeypatch):
+    client = create_client(monkeypatch)
+    first = client.post("/api/session/connect", json={"clientId": "ATM Aurora"})
+    second = client.post("/api/session/connect", json={"clientId": "ATM Nova"})
+
+    first_status = client.get("/api/session/status", headers=auth_headers(first))
+    second_status = client.get("/api/session/status", headers=auth_headers(second))
+
+    assert first_status.status_code == 200
+    assert second_status.status_code == 200
+    assert first_status.json()["data"]["clientId"] == "ATM Aurora"
+    assert second_status.json()["data"]["clientId"] == "ATM Nova"

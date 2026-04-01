@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import threading
 from typing import Any, Dict, List
 
+from .audit_support import read_audit_log_entries
 from .config import get_firebase_service_account_path, get_firebase_web_api_key
 
 try:
@@ -75,6 +76,10 @@ def is_firebase_available() -> bool:
 
 
 def fetch_audit_logs(limit: int = 20) -> Dict[str, Any]:
+    local_logs = read_audit_log_entries(limit=limit)
+    if local_logs["available"]:
+        return local_logs
+
     try:
         context = get_firebase_context()
         documents = (
@@ -98,6 +103,6 @@ def fetch_audit_logs(limit: int = 20) -> Dict[str, Any]:
                 }
             )
 
-        return {"available": True, "message": "ok", "logs": logs}
+        return {"available": True, "message": "ok", "logs": logs, "path": None}
     except Exception as exc:
-        return {"available": False, "message": str(exc), "logs": []}
+        return {"available": False, "message": str(exc), "logs": [], "path": None}

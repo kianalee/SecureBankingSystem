@@ -18,6 +18,7 @@ Copy `.env.example` values into your shell or environment manager:
 - `GATEWAY_SESSION_SECRET`
 - `FRONTEND_ORIGINS`
 - `ADMIN_PANEL_PASSWORD`
+- `AUDIT_LOG_PATH`
 
 ## Backend setup
 
@@ -73,6 +74,14 @@ npm run dev
 The Vite dev server runs on `http://localhost:5173` and proxies API requests to `http://localhost:8000`.
 
 After `npm run build`, the gateway can also serve `frontend/dist` directly at `http://127.0.0.1:8000/`.
+
+## Demo checklist
+
+1. Start the stack with `python3 run_stack.py`.
+2. Open `/app`, connect `ATM Aurora`, log in, then perform 2-3 actions such as deposit, withdraw, and balance.
+3. Open a second tab or window, choose another client ID, and repeat the flow for a different customer.
+4. Open `/admin` and confirm the latest entries plus the local audit log file path.
+5. Use [PROTOCOL_NOTES.md](/Users/arjunthiru/SecureBankingSystem/PROTOCOL_NOTES.md) for protocol questions during the TA walkthrough.
 
 ## Tests
 

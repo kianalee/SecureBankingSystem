@@ -68,25 +68,27 @@ def parse_signed_value(raw: Optional[str]) -> Optional[str]:
     return value
 
 
-def get_session_id_from_cookie(request: Request) -> Optional[str]:
-    # Try cookie first
-    raw = request.cookies.get(COOKIE_NAME)
+def get_explicit_session_id(request: Request) -> Optional[str]:
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    if auth and auth.lower().startswith("bearer "):
+        return parse_signed_value(auth[7:].strip())
 
-    # Fallback: Accept token via Authorization: Bearer <signed-token>
-    if not raw:
-        auth = request.headers.get("authorization") or request.headers.get("Authorization")
-        if auth and auth.lower().startswith("bearer "):
-            raw = auth[7:].strip()
-
-    # Fallback: Accept token via X-Session or X-SecureBank-Sid header
-    if not raw:
-        raw = request.headers.get("x-session") or request.headers.get("x-securebank-sid")
-
+    raw = request.headers.get("x-session") or request.headers.get("x-securebank-sid")
     return parse_signed_value(raw)
 
 
+def get_session_id(request: Request) -> Optional[str]:
+    # ATM sessions intentionally prefer explicit per-tab headers.
+    explicit_session_id = get_explicit_session_id(request)
+    if explicit_session_id:
+        return explicit_session_id
+
+    # Cookie fallback is kept only for backwards compatibility with old builds.
+    return parse_signed_value(request.cookies.get(COOKIE_NAME))
+
+
 def get_optional_session(request: Request) -> Optional[GatewaySession]:
-    session_id = get_session_id_from_cookie(request)
+    session_id = get_session_id(request)
     if not session_id:
         return None
 
@@ -210,7 +212,7 @@ async def healthcheck() -> Dict[str, Any]:
 
 @app.post("/api/session/connect")
 async def connect_session(payload: ConnectRequest, request: Request, response: Response) -> Dict[str, Any]:
-    existing_session_id = get_session_id_from_cookie(request)
+    existing_session_id = get_explicit_session_id(request)
     if existing_session_id:
         close_session(existing_session_id)
 
@@ -226,14 +228,9 @@ async def connect_session(payload: ConnectRequest, request: Request, response: R
     store.upsert(session)
 
     signed = sign_session_id(session_id)
-    response.set_cookie(
-        key=COOKIE_NAME,
-        value=signed,
-        httponly=True,
-        samesite="lax",
-        secure=False,
-        max_age=60 * 60 * 8,
-    )
+    # ATM sessions use the explicit session token returned in the JSON response.
+    # Clear any legacy cookie so multiple localhost ports or tabs cannot clobber each other.
+    response.delete_cookie(COOKIE_NAME)
 
     return api_response(
         "ok",
@@ -283,9 +280,9 @@ async def logout(request: Request) -> Dict[str, Any]:
 
 
 @app.get("/api/account/balance")
-async def balance(request: Request) -> Dict[str, Any]:
+async def balance(request: Request, silent: bool = False) -> Dict[str, Any]:
     session = require_session(request)
-    result = session.client.balance()
+    result = session.client.balance(record_activity=not silent)
     return api_response(result.get("status", "ok"), result.get("msg", "Balance retrieved."), result)
 
 
@@ -344,7 +341,12 @@ async def admin_overview(request: Request) -> Dict[str, Any]:
         {
             "server": health,
             "sessions": {"count": len(sessions), "items": sessions},
-            "audit": {"available": logs["available"], "message": logs["message"], "items": logs["logs"]},
+            "audit": {
+                "available": logs["available"],
+                "message": logs["message"],
+                "items": logs["logs"],
+                "path": logs.get("path"),
+            },
         },
     )
 
@@ -389,7 +391,7 @@ async def admin_auth_logout(response: Response) -> Dict[str, Any]:
 
 @app.delete("/api/session")
 async def disconnect_session(request: Request, response: Response) -> Dict[str, Any]:
-    session_id = get_session_id_from_cookie(request)
+    session_id = get_session_id(request)
     if session_id:
         close_session(session_id)
     response.delete_cookie(COOKIE_NAME)

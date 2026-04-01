@@ -65,3 +65,10 @@ def get_frontend_dist_path() -> Path:
 
 def get_admin_panel_password() -> str:
     return os.getenv("ADMIN_PANEL_PASSWORD", "").strip()
+
+
+def get_audit_log_path() -> Path:
+    raw = os.getenv("AUDIT_LOG_PATH", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return PROJECT_ROOT / "audit.log"

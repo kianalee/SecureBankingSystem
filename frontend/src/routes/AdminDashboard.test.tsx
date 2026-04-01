@@ -26,14 +26,14 @@ describe("AdminDashboard", () => {
           ok: true,
           json: async () => ({
             status: "ok",
-            message: "Admin overview retrieved.",
-            data: {
-              server: { reachable: true, host: "localhost", port: 1234, message: "reachable" },
-              sessions: { count: 0, items: [] },
-              audit: { available: true, message: "ok", items: [] },
-            },
-          }),
-        };
+          message: "Admin overview retrieved.",
+          data: {
+            server: { reachable: true, host: "localhost", port: 1234, message: "reachable" },
+            sessions: { count: 0, items: [] },
+            audit: { available: true, message: "ok", items: [], path: "/tmp/audit.log" },
+          },
+        }),
+      };
       }),
     );
   });

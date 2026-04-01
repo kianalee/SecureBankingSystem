@@ -39,6 +39,7 @@ type OverviewData = {
     available: boolean;
     message: string;
     items: AuditItem[];
+    path?: string | null;
   };
 };
 
@@ -124,15 +125,17 @@ export function AdminDashboard() {
 
   if (!authStatus?.authenticated) {
     return (
-      <main className="page-grid admin-grid">
-        <section className="hero-card admin-hero">
-          <p className="eyebrow">Admin</p>
-          <h2>Restricted panel.</h2>
-          <p className="lead">Enter the admin password to continue.</p>
+      <main className="page-grid admin-grid admin-layout">
+        <section className="hero-card admin-hero compact-hero">
+          <div className="hero-copy-row">
+            <p className="eyebrow">Admin</p>
+            <h2>Restricted panel.</h2>
+            <p className="lead">Enter the admin password to continue.</p>
+          </div>
           <p className="status-message">{loading ? "Checking access..." : message}</p>
         </section>
 
-        <Panel title="Admin login" className="admin-auth-panel">
+        <Panel title="Admin login" className="admin-auth-panel compact-panel">
           <form className="stack" onSubmit={handleAdminLogin}>
             <label className="field">
               <span>Password</span>
@@ -153,12 +156,14 @@ export function AdminDashboard() {
   }
 
   return (
-    <main className="page-grid admin-grid">
-      <section className="hero-card admin-hero">
-        <p className="eyebrow">Admin</p>
-        <h2>System overview.</h2>
-        <p className="lead">Live sessions, audit activity, and server health.</p>
-        <div className="inline-status-row">
+    <main className="page-grid admin-grid admin-layout">
+      <section className="hero-card admin-hero compact-hero">
+        <div className="hero-copy-row">
+          <p className="eyebrow">Admin</p>
+          <h2>System overview.</h2>
+          <p className="lead">Sessions, audit activity, server health.</p>
+        </div>
+        <div className="hero-side admin-hero-side">
           <p className="status-message">{loading ? "Refreshing..." : message}</p>
           <button className="ghost" type="button" onClick={handleAdminLogout} disabled={authBusy}>
             Sign out
@@ -166,7 +171,7 @@ export function AdminDashboard() {
         </div>
       </section>
 
-      <Panel title="Overview">
+      <Panel title="Overview" className="compact-panel">
         <div className="hero-stats">
           <div>
             <span>Server</span>
@@ -191,7 +196,7 @@ export function AdminDashboard() {
         </div>
       </Panel>
 
-      <Panel title="Active sessions" className="wide-panel">
+      <Panel title="Active sessions" className="compact-panel admin-sessions-panel">
         <div className="table-shell">
           <table>
             <thead>
@@ -226,7 +231,8 @@ export function AdminDashboard() {
         </div>
       </Panel>
 
-      <Panel title="Audit log" className="wide-panel">
+      <Panel title="Audit log" className="compact-panel admin-audit-panel">
+        {overview?.audit.available ? <p className="help-text"></p> : null}
         {overview?.audit.available ? null : <p className="empty-state">{overview?.audit.message}</p>}
         <ul className="activity-feed">
           {(overview?.audit.items ?? []).map((item) => (

@@ -7,10 +7,6 @@ export function App() {
   return (
     <div className="app-frame">
       <header className="topbar">
-        <div>
-          <p className="eyebrow">SecureBankingSystem</p>
-          <h1>Premium ATM Banking Demo</h1>
-        </div>
         <nav className="topbar-nav" aria-label="Primary">
           <NavLink to="/app" className={({ isActive }) => navClass(isActive)}>
             ATM App
