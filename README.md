@@ -81,7 +81,6 @@ After `npm run build`, the gateway can also serve `frontend/dist` directly at `h
 2. Open `/app`, connect `ATM Aurora`, log in, then perform 2-3 actions such as deposit, withdraw, and balance.
 3. Open a second tab or window, choose another client ID, and repeat the flow for a different customer.
 4. Open `/admin` and confirm the latest entries plus the local audit log file path.
-5. Use [PROTOCOL_NOTES.md](/Users/arjunthiru/SecureBankingSystem/PROTOCOL_NOTES.md) for protocol questions during the TA walkthrough.
 
 ## Tests
 
