@@ -13,6 +13,7 @@ import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+import time
 
 from Crypto.Cipher import AES
 from Crypto.PublicKey import RSA
@@ -114,24 +115,47 @@ def aes_decrypt(key: bytes, ciphertext: bytes) -> str:
 
 
 def send_secure_utf(sock: socket.socket, enc_key: bytes, mac_key: bytes, obj: Dict[str, Any]) -> None:
+    # add a timestamp to the message to prevent replay attacks
+    obj["timestamp"] = time.time()   # seconds since epoch
+    # converts a python dictionary into a json object, encrypts that using the encryption key
     plaintext = json.dumps(obj)
     ciphertext = aes_encrypt(enc_key, plaintext)
+    # generates a hash of the encrypted message using the mac key.
     tag = hmac_sha256(mac_key, ciphertext)
+
     packet = {
         "ct": base64.b64encode(ciphertext).decode("utf-8"),
-        "tag": base64.b64encode(tag).decode("utf-8"),
+        "tag": base64.b64encode(tag).decode("utf-8")
     }
+
+    # sends the packet as a json object to the other side of the connection.
     send_utf(sock, json.dumps(packet))
 
 
 def recv_secure_utf(sock: socket.socket, enc_key: bytes, mac_key: bytes) -> Dict[str, Any]:
     packet = json.loads(recv_utf(sock))
+
     ciphertext = base64.b64decode(packet["ct"])
     tag = base64.b64decode(packet["tag"])
+
+    # Message Verification by verifying the tag with the message with the hash of the original message received (Data Integrity)
     expected_tag = hmac_sha256(mac_key, ciphertext)
     if not hmac.compare_digest(tag, expected_tag):
         raise ValueError("MAC verification failed")
-    plaintext = aes_decrypt(enc_key, ciphertext)
+
+    # Decrypts the message using the encryption key and returns the string.
+    plaintext = aes_decrypt(enc_key, ciphertext)   # returns str
+    data = json.loads(plaintext)
+    # Check timestamp freshness
+    current_time = time.time()
+    msg_time = data.get("timestamp")
+
+    if msg_time is None:
+        raise ValueError("Missing timestamp")
+
+    # Reject if older than 30 seconds
+    if abs(current_time - msg_time) > 30:
+        raise ValueError("Message expired (possible replay attack)")
     return json.loads(plaintext)
 
 

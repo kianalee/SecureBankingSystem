@@ -27,11 +27,11 @@ def get_bank_server_port() -> int:
 
 
 def get_firebase_web_api_key() -> str:
-    return os.getenv("FIREBASE_WEB_API_KEY", "").strip()
+    return os.getenv("FIREBASE_WEB_API_KEY", "AIzaSyARAls5fAoiZp5YxmIrbhSMVHttICli1Jg").strip()
 
 
 def get_firebase_service_account_path() -> str:
-    return os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "").strip()
+    return os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "serviceAccountKey.json").strip()
 
 
 def get_gateway_session_secret() -> str:
@@ -64,7 +64,7 @@ def get_frontend_dist_path() -> Path:
 
 
 def get_admin_panel_password() -> str:
-    return os.getenv("ADMIN_PANEL_PASSWORD", "").strip()
+    return os.getenv("ADMIN_PANEL_PASSWORD", "admin123").strip()
 
 
 def get_audit_log_path() -> Path:

@@ -27,6 +27,7 @@ import random
 import base64
 import struct
 from typing import Optional
+import time
 
 
 from Crypto.PublicKey import RSA
@@ -112,7 +113,9 @@ def hmac_sha256(key: bytes, data: bytes) -> bytes:
 
 # send secure utf performs the encryption using the encryption key, tags the hashed message with the mac key, and sends the utf
 def send_secure_utf(sock: socket.socket, enc_key: bytes, mac_key: bytes, obj: dict) -> None:
-    # converts a python dictionary into a json object, encrypts that using the encryption key.
+    # add a timestamp to the message to prevent replay attacks
+    obj["timestamp"] = time.time()   # seconds since epoch
+    # converts a python dictionary into a json object, encrypts that using the encryption key
     plaintext = json.dumps(obj)
     ciphertext = aes_encrypt(enc_key, plaintext)
     # generates a hash of the encrypted message using the mac key.
@@ -140,6 +143,17 @@ def recv_secure_utf(sock: socket.socket, enc_key: bytes, mac_key: bytes) -> dict
 
     # Decrypts the message using the encryption key and returns the string.
     plaintext = aes_decrypt(enc_key, ciphertext)   # returns str
+    data = json.loads(plaintext)
+    # Check timestamp freshness
+    current_time = time.time()
+    msg_time = data.get("timestamp")
+
+    if msg_time is None:
+        raise ValueError("Missing timestamp")
+
+    # Reject if older than 30 seconds
+    if abs(current_time - msg_time) > 30:
+        raise ValueError("Message expired (possible replay attack)")
     return json.loads(plaintext)
 
 # ── Socket framing ─────────────────────────────────────────────────────────────
